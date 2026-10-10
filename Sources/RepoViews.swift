@@ -2,67 +2,6 @@ import SwiftUI
 
 // MARK: - 仓库列表
 
-struct ReposView: View {
-    @State private var repos: [Repo] = []
-    @State private var query = ""
-    @State private var loading = false
-    @State private var errorMsg: String?
-
-    private var filtered: [Repo] {
-        if query.isEmpty { return repos }
-        return repos.filter {
-            $0.fullName.localizedCaseInsensitiveContains(query)
-                || ($0.description ?? "").localizedCaseInsensitiveContains(query)
-        }
-    }
-
-    var body: some View {
-        NavigationView {
-            List {
-                if let e = errorMsg {
-                    Text(e).font(.footnote).foregroundColor(.red)
-                }
-                ForEach(filtered) { r in
-                    NavigationLink(destination: RepoDetailView(repo: r)) { RepoRow(repo: r) }
-                }
-            }
-            .listStyle(.plain)
-            .overlay { if loading && repos.isEmpty { ProgressView() } }
-            .searchable(text: $query, prompt: "筛选仓库")
-            .navigationTitle("仓库")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    NavigationLink(destination: NewRepoView(onCreated: { Task { await load() } })) {
-                        Image(systemName: "plus")
-                    }
-                }
-            }
-            .refreshable { await load() }
-            .task { if repos.isEmpty { await load() } }
-        }
-        .navigationViewStyle(.stack)
-    }
-
-    private func load() async {
-        loading = true
-        errorMsg = nil
-        do {
-            var all: [Repo] = []
-            var page = 1
-            while page <= 5 {
-                let part: [Repo] = try await API.shared.get("/user/repos?sort=updated&per_page=100&page=\(page)")
-                all += part
-                if part.count < 100 { break }
-                page += 1
-            }
-            repos = all
-        } catch {
-            errorMsg = errText(error)
-        }
-        loading = false
-    }
-}
-
 struct RepoRow: View {
     let repo: Repo
 
@@ -119,6 +58,7 @@ struct NewRepoView: View {
                     .disabled(name.isEmpty || busy)
             }
         }
+        .neonBackground()
         .navigationTitle("新建仓库")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -173,6 +113,7 @@ struct RepoDetailView: View {
                 }
             }
         }
+        .neonBackground()
         .navigationTitle(repo.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -224,6 +165,17 @@ struct RepoInfoView: View {
                 if let e = errorMsg {
                     Text(e).font(.footnote).foregroundColor(.red)
                 }
+
+                NavigationLink(
+                    destination: AIChatView(
+                        contextTitle: repo.fullName,
+                        contextText: String((readme ?? repo.description ?? "").prefix(6000)),
+                        quickPrompts: ["用中文总结这个仓库", "怎么安装和使用？", "有哪些注意事项或风险？"]
+                    )
+                ) {
+                    Label("问 AI", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
 
                 TranslateBar(on: $zh)
                 Divider()
@@ -291,6 +243,7 @@ struct FilesView: View {
         }
         .listStyle(.plain)
         .overlay { if loading { ProgressView() } }
+        .neonBackground()
         .navigationTitle(embedded ? repo.name : (path as NSString).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
@@ -348,6 +301,7 @@ struct FileView: View {
             }
             .padding()
         }
+        .neonBackground()
         .navigationTitle(item.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }

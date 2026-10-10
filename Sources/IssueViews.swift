@@ -41,7 +41,8 @@ struct IssuesView: View {
                     Text("没有内容").foregroundColor(.secondary)
                 }
             }
-            .navigationTitle("议题")
+            .neonBackground()
+        .navigationTitle("议题")
             .refreshable { await load() }
             .task(id: "\(kind)-\(state)-\(app.user?.login ?? "")") { await load() }
         }
@@ -184,6 +185,7 @@ struct NewIssueView: View {
                     .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || busy)
             }
         }
+        .neonBackground()
         .navigationTitle("新建议题")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -246,6 +248,17 @@ struct IssueDetailView: View {
                         .foregroundColor(.secondary)
                 }
 
+                NavigationLink(
+                    destination: AIChatView(
+                        contextTitle: "\(repoFullName)#\(issue.number)",
+                        contextText: aiContext,
+                        quickPrompts: ["用中文总结这个议题", "给出解决思路", "帮我起草一条回复"]
+                    )
+                ) {
+                    Label("问 AI", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+
                 TranslateBar(on: $zh)
 
                 if let b = issue.body, !b.isEmpty {
@@ -266,14 +279,16 @@ struct IssueDetailView: View {
                     }
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground))
+                    .background(Theme.card)
                     .cornerRadius(10)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
                     TextEditor(text: $newComment)
                         .frame(height: 90)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
+                        .background(Theme.card)
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.cyan.opacity(0.35)))
                     HStack {
                         Button(state == "open" ? "关闭" : "重新打开") {
                             Task { await toggleState() }
@@ -291,6 +306,7 @@ struct IssueDetailView: View {
             }
             .padding()
         }
+        .neonBackground()
         .navigationTitle("#\(issue.number)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -307,6 +323,14 @@ struct IssueDetailView: View {
                 titleZh = r.first
             }
         }
+    }
+
+    private var aiContext: String {
+        var s = "标题：\(issue.title)\n状态：\(state)\n\n\(issue.body ?? "")"
+        for c in comments.suffix(5) {
+            s += "\n\n--- \(c.user.login) 的评论 ---\n\(c.body ?? "")"
+        }
+        return String(s.prefix(6000))
     }
 
     private func load() async {

@@ -31,7 +31,7 @@ enum MD {
         s.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
     }
 
-    static func parse(_ src: String) -> [MDBlock] {
+    static func parse(_ src: String, sanitize: Bool = true) -> [MDBlock] {
         var blocks: [MDBlock] = []
         var para: [String] = []
         var code: [String] = []
@@ -68,7 +68,7 @@ enum MD {
                 continue
             }
 
-            let t = clean(t0)
+            let t = sanitize ? clean(t0) : t0
             if t.isEmpty { continue }
 
             if t.hasPrefix("#") {
@@ -189,7 +189,7 @@ struct MarkdownView: View {
                     .font(.system(.footnote, design: .monospaced))
                     .padding(8)
             }
-            .background(Color(.secondarySystemBackground))
+            .background(Theme.card)
             .cornerRadius(8)
         case .rule:
             Divider()
@@ -239,7 +239,7 @@ struct TranslateBar: View {
             Toggle("", isOn: $on).labelsHidden()
         }
         .padding(10)
-        .background(Color(.secondarySystemBackground))
+        .background(Theme.card)
         .cornerRadius(10)
     }
 }

@@ -71,28 +71,31 @@ struct ActivityView: UIViewControllerRepresentable {
 
 enum Keychain {
     private static let service = "com.lin.githubcn"
-    private static let fallbackKey = "gh_token_fallback"
 
-    private static func baseQuery() -> [String: Any] {
+    private static func baseQuery(_ account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: "token"
+            kSecAttrAccount as String: account
         ]
     }
 
-    static func save(_ value: String) {
-        SecItemDelete(baseQuery() as CFDictionary)
-        var q = baseQuery()
+    private static func fallbackKey(_ account: String) -> String { "kc_fb_" + account }
+
+    static func save(_ value: String, account: String = "token") {
+        SecItemDelete(baseQuery(account) as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: fallbackKey(account))
+        if value.isEmpty { return }
+        var q = baseQuery(account)
         q[kSecValueData as String] = Data(value.utf8)
         let status = SecItemAdd(q as CFDictionary, nil)
         if status != errSecSuccess {
-            UserDefaults.standard.set(value, forKey: fallbackKey)
+            UserDefaults.standard.set(value, forKey: fallbackKey(account))
         }
     }
 
-    static func load() -> String? {
-        var q = baseQuery()
+    static func load(account: String = "token") -> String? {
+        var q = baseQuery(account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: AnyObject?
@@ -101,12 +104,12 @@ enum Keychain {
            let s = String(data: d, encoding: .utf8) {
             return s
         }
-        return UserDefaults.standard.string(forKey: fallbackKey)
+        return UserDefaults.standard.string(forKey: fallbackKey(account))
     }
 
-    static func delete() {
-        SecItemDelete(baseQuery() as CFDictionary)
-        UserDefaults.standard.removeObject(forKey: fallbackKey)
+    static func delete(account: String = "token") {
+        SecItemDelete(baseQuery(account) as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: fallbackKey(account))
     }
 }
 

@@ -167,6 +167,7 @@ struct RunDetailView: View {
                 Section { Text(e).foregroundColor(.red) }
             }
         }
+        .neonBackground()
         .navigationTitle("运行 #\(run.runNumber ?? 0)")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $share) { item in
@@ -260,7 +261,7 @@ struct ReleasesView: View {
                     }
                     .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground))
+                    .background(Theme.card)
                     .cornerRadius(12)
                 }
             }
