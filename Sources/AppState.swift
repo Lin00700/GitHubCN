@@ -1,6 +1,4 @@
 import SwiftUI
-import Combine
-import GoogleSignIn
 
 struct AIChatMessage: Identifiable, Codable {
     let id: UUID = UUID()
@@ -10,104 +8,76 @@ struct AIChatMessage: Identifiable, Codable {
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var repositories: [Repository] = []
-    @Published var issues: [Issue] = []
-    @Published var isLoading: Bool = false
-    @Published var errorMessage: String? = nil
-    @Published var searchText: String = "swift"
-    @Published var selectedSort: String = "stars"
-    @Published var isDarkMode: Bool = true
-    @Published var favorites: Set<Int> = []
-    
-    @Published var isAuthenticated: Bool = false
-    @Published var userEmail: String? = nil
-    @Published var userName: String? = nil
-    @Published var userAvatarURL: String? = nil
+    @Published var loggedIn = false
+    @Published var user: GHUser?
+    @Published var loading = false
+    @Published var error: String?
     
     @Published var selectedAIModel: String = "OpenAI GPT-4o"
     @Published var aiChatHistory: [AIChatMessage] = [
-        AIChatMessage(role: "assistant", content: "您好！我是您的专属 AI 开发助手。您可以在设置中切换内置模型或配置任意【自定义 AI 入口】。")
+        AIChatMessage(role: "assistant", content: "您好！我是您的专属 AI 开发助手。您可以在"我的"页面配置任意【自定义 AI 入口】或切换主流模型。")
     ]
-    @Published var isAILoading: Bool = false
+    @Published var isAILoading = false
     @Published var customAPIEndpoint: String = "https://api.openai.com/v1/chat/completions"
     @Published var customModelName: String = "gpt-4o-mini"
     @Published var customAPIKey: String = ""
 
-    func checkExistingSession() {
-        if GIDSignIn.sharedInstance.hasPreviousSignIn() {
-            GIDSignIn.sharedInstance.restorePreviousSignIn { [weak self] user, error in
-                guard let self = self, let user = user else { return }
-                self.isAuthenticated = true
-                self.userEmail = user.profile?.email
-                self.userName = user.profile?.name
-                self.userAvatarURL = user.profile?.imageURL(withDimension: 200)?.absoluteString
-            }
+    init() {
+        if let t = Keychain.load(), !t.isEmpty {
+            API.shared.token = t
+            loggedIn = true
+            Task { await refreshUser() }
         }
     }
-    
-    func signInWithGoogle() async {
-        isLoading = true
+
+    func refreshUser() async {
         do {
-            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                  let rootViewController = windowScene.windows.first?.rootViewController else {
-                throw APIError.invalidURL
-            }
-            let result = try await GIDSignIn.sharedInstance.signIn(withPresenting: rootViewController)
-            let user = result.user
-            self.isAuthenticated = true
-            self.userEmail = user.profile?.email
-            self.userName = user.profile?.name
-            self.userAvatarURL = user.profile?.imageURL(withDimension: 200)?.absoluteString
+            let u: GHUser = try await API.shared.get("/user")
+            user = u
         } catch {
-            self.errorMessage = "登录失败: \(error.localizedDescription)"
+            if case APIError.http(401, _) = error { logout() }
         }
-        isLoading = false
     }
-    
-    func signOut() {
-        GIDSignIn.sharedInstance.signOut()
-        isAuthenticated = false
-        userEmail = nil
-        userName = nil
-        userAvatarURL = nil
-    }
-    
-    func searchRepositories() async {
-        guard !searchText.isEmpty else { return }
-        isLoading = true
-        errorMessage = nil
+
+    func login(token: String) async {
+        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        loading = true
+        self.error = nil
+        API.shared.token = t
         do {
-            self.repositories = try await APIClient.shared.fetchRepositories(query: searchText, sort: selectedSort)
+            let u: GHUser = try await API.shared.get("/user")
+            Keychain.save(t)
+            user = u
+            loggedIn = true
         } catch {
-            self.errorMessage = error.localizedDescription
+            API.shared.token = ""
+            self.error = errText(error) ?? "登录失败"
         }
-        isLoading = false
+        loading = false
     }
-    
-    func toggleFavorite(for repoID: Int) {
-        if favorites.contains(repoID) { favorites.remove(repoID) }
-        else { favorites.insert(repoID) }
+
+    func logout() {
+        Keychain.delete()
+        API.shared.token = ""
+        user = nil
+        loggedIn = false
     }
     
     func sendAIMessage(prompt: String) async {
         guard !prompt.isEmpty else { return }
-        let userMsg = AIChatMessage(role: "user", content: prompt)
-        aiChatHistory.append(userMsg)
+        aiChatHistory.append(AIChatMessage(role: "user", content: prompt))
         isAILoading = true
-        
         do {
-            let aiResponse = try await AIService.shared.queryAI(
+            let res = try await AIService.shared.queryAI(
                 model: selectedAIModel,
                 prompt: prompt,
                 endpoint: customAPIEndpoint,
                 customModel: customModelName,
                 apiKey: customAPIKey
             )
-            let assistantMsg = AIChatMessage(role: "assistant", content: aiResponse)
-            aiChatHistory.append(assistantMsg)
+            aiChatHistory.append(AIChatMessage(role: "assistant", content: res))
         } catch {
-            let errorMsg = AIChatMessage(role: "assistant", content: "⚠️ AI 调用出错: \(error.localizedDescription)")
-            aiChatHistory.append(errorMsg)
+            aiChatHistory.append(AIChatMessage(role: "assistant", content: "⚠️ AI 调用出错: \(error.localizedDescription)"))
         }
         isAILoading = false
     }
