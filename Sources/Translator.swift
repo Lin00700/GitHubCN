@@ -5,19 +5,29 @@ import Foundation
 enum Translator {
     static let targetLang = "zh-CN"
 
+    /// 分批并发（每批 6 条），避免一次发出太多请求
     static func translate(_ texts: [String]) async -> [String] {
-        await withTaskGroup(of: (Int, String).self) { group in
-            for (i, t) in texts.enumerated() {
-                group.addTask { (i, await translateOne(t)) }
+        var out = texts
+        var start = 0
+        while start < texts.count {
+            let end = min(start + 6, texts.count)
+            let pairs: [(Int, String)] = await withTaskGroup(of: (Int, String).self) { group in
+                for i in start..<end {
+                    let t = texts[i]
+                    group.addTask { (i, await translateOne(t)) }
+                }
+                var r: [(Int, String)] = []
+                for await p in group { r.append(p) }
+                return r
             }
-            var out = texts
-            for await (i, s) in group { out[i] = s }
-            return out
+            for (i, s) in pairs { out[i] = s }
+            start = end
         }
+        return out
     }
 
     private static func translateOne(_ text: String) async -> String {
-        let trimmed = String(text.prefix(1500))
+        let trimmed = String(text.prefix(3000))
         var comps = URLComponents(string: "https://translate.googleapis.com/translate_a/single")!
         comps.queryItems = [
             URLQueryItem(name: "client", value: "gtx"),
