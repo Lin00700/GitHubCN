@@ -1,152 +1,365 @@
 import SwiftUI
 
-struct RepoListView: View {
-    @EnvironmentObject var appState: AppState
-    
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                Color(.systemGroupedBackground).ignoresSafeArea()
-                
-                ScrollView {
-                    LazyVStack(spacing: 16) {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 12) {
-                                ForEach(["stars", "forks", "updated"], id: \.self) { sortOption in
-                                    Button(action: {
-                                        appState.selectedSort = sortOption
-                                        Task { await appState.searchRepositories() }
-                                    }) {
-                                        Text(sortOption.uppercased())
-                                            .font(.caption.bold())
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 8)
-                                            .background(appState.selectedSort == sortOption ? Color.purple : Color(.secondarySystemBackground))
-                                            .foregroundColor(appState.selectedSort == sortOption ? .white : .primary)
-                                            .cornerRadius(12)
-                                    }
-                                }
-                            }
-                            .padding(.horizontal)
-                        }
-                        .padding(.top, 8)
-                        
-                        ForEach(appState.repositories) { repo in
-                            NavigationLink(destination: RepoDetailView(repo: repo)) {
-                                VCard(repo: repo, appState: appState)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding()
-                }
-            }
-            .searchable(text: $appState.searchText, prompt: "探索百万开源仓库...")
-            .onChange(of: appState.searchText) { _, _ in
-                Task { await appState.searchRepositories() }
-            }
-            .navigationTitle("开源星河")
-            .task {
-                if appState.repositories.isEmpty {
-                    await appState.searchRepositories()
-                }
-            }
+// MARK: - 仓库列表
+
+struct ReposView: View {
+    @State private var repos: [Repo] = []
+    @State private var query = ""
+    @State private var loading = false
+    @State private var errorMsg: String?
+
+    private var filtered: [Repo] {
+        if query.isEmpty { return repos }
+        return repos.filter {
+            $0.fullName.localizedCaseInsensitiveContains(query)
+                || ($0.description ?? "").localizedCaseInsensitiveContains(query)
         }
+    }
+
+    var body: some View {
+        NavigationView {
+            List {
+                if let e = errorMsg {
+                    Text(e).font(.footnote).foregroundColor(.red)
+                }
+                ForEach(filtered) { r in
+                    NavigationLink(destination: RepoDetailView(repo: r)) { RepoRow(repo: r) }
+                }
+            }
+            .listStyle(.plain)
+            .overlay { if loading && repos.isEmpty { ProgressView() } }
+            .searchable(text: $query, prompt: "筛选仓库")
+            .navigationTitle("仓库")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    NavigationLink(destination: NewRepoView(onCreated: { Task { await load() } })) {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .refreshable { await load() }
+            .task { if repos.isEmpty { await load() } }
+        }
+        .navigationViewStyle(.stack)
+    }
+
+    private func load() async {
+        loading = true
+        errorMsg = nil
+        do {
+            var all: [Repo] = []
+            var page = 1
+            while page <= 5 {
+                let part: [Repo] = try await API.shared.get("/user/repos?sort=updated&per_page=100&page=\(page)")
+                all += part
+                if part.count < 100 { break }
+                page += 1
+            }
+            repos = all
+        } catch {
+            errorMsg = errText(error)
+        }
+        loading = false
     }
 }
 
-struct VCard: View {
-    let repo: Repository
-    @ObservedObject var appState: AppState
-    
+struct RepoRow: View {
+    let repo: Repo
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                AsyncImage(url: URL(string: repo.owner?.avatarURL ?? "")) { image in
-                    image.resizable().aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    Color.purple.opacity(0.3)
-                }
-                .frame(width: 44, height: 44)
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Color.purple.opacity(0.5), lineWidth: 1))
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(repo.fullName)
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    Text(repo.owner?.login ?? "GitHub")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                Button(action: {
-                    appState.toggleFavorite(for: repo.id)
-                }) {
-                    Image(systemName: appState.favorites.contains(repo.id) ? "star.fill" : "star")
-                        .foregroundColor(.yellow)
-                        .font(.title3)
-                }
-            }
-            
-            if let desc = repo.description {
-                Text(desc)
-                    .font(.subheadline)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: repo.isPrivate ? "lock" : "book.closed")
                     .foregroundColor(.secondary)
-                    .lineLimit(2)
+                Text(repo.fullName).font(.headline).lineLimit(1)
             }
-            
-            HStack {
-                if let lang = repo.language {
-                    Text(lang)
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Color.purple.opacity(0.15))
-                        .foregroundColor(.purple)
-                        .cornerRadius(8)
+            if let d = repo.description, !d.isEmpty {
+                Text(d).font(.subheadline).foregroundColor(.secondary).lineLimit(2)
+            }
+            HStack(spacing: 12) {
+                if let l = repo.language {
+                    Text(l).font(.caption)
                 }
-                
+                Label("\(repo.stargazersCount)", systemImage: "star").font(.caption)
+                Label("\(repo.forksCount)", systemImage: "arrow.triangle.branch").font(.caption)
                 Spacer()
-                
-                HStack(spacing: 14) {
-                    Label("\(repo.stargazersCount)", systemImage: "star.fill")
-                        .foregroundColor(.yellow)
-                    Label("\(repo.forksCount)", systemImage: "tuningfork")
-                        .foregroundColor(.cyan)
-                }
-                .font(.caption.bold())
+                Text(relTime(repo.updatedAt)).font(.caption)
             }
+            .foregroundColor(.secondary)
         }
-        .padding(18)
-        .background(.ultraThinMaterial)
-        .cornerRadius(20)
-        .shadow(color: Color.black.opacity(0.06), radius: 12, x: 0, y: 6)
-        .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
+        .padding(.vertical, 2)
     }
 }
+
+struct NewRepoView: View {
+    var onCreated: () -> Void
+    @Environment(\.presentationMode) private var mode
+    @State private var name = ""
+    @State private var desc = ""
+    @State private var isPrivate = false
+    @State private var addReadme = true
+    @State private var busy = false
+    @State private var errorMsg: String?
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("仓库名称", text: $name)
+                    .textInputAutocapitalization(.never)
+                    .disableAutocorrection(true)
+                TextField("描述（可选）", text: $desc)
+                Toggle("私有仓库", isOn: $isPrivate)
+                Toggle("添加 README", isOn: $addReadme)
+            }
+            if let e = errorMsg {
+                Section { Text(e).foregroundColor(.red) }
+            }
+            Section {
+                Button("创建仓库") { Task { await create() } }
+                    .disabled(name.isEmpty || busy)
+            }
+        }
+        .navigationTitle("新建仓库")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func create() async {
+        busy = true
+        errorMsg = nil
+        do {
+            try await API.shared.post("/user/repos", body: [
+                "name": name,
+                "description": desc,
+                "private": isPrivate,
+                "auto_init": addReadme
+            ])
+            onCreated()
+            mode.wrappedValue.dismiss()
+        } catch {
+            errorMsg = errText(error)
+        }
+        busy = false
+    }
+}
+
+// MARK: - 仓库详情
 
 struct RepoDetailView: View {
-    let repo: Repository
+    let repo: Repo
+    @State private var tab = 0
+
     var body: some View {
-        MarkdownRenderer(content: """
-        # \(repo.fullName)
-        
-        > **项目描述**: \(repo.description ?? "暂无描述")
-        
-        - **主要语言**: \(repo.language ?? "通用")
-        - **获得星标**: ⭐ \(repo.stargazersCount)
-        - **代码分支**: 🔀 \(repo.forksCount)
-        
-        ### 快速开始 (Quick Start)
-        [\(repo.htmlURL)](\(repo.htmlURL))
-        """)
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                Text("简介").tag(0)
+                Text("文件").tag(1)
+                Text("议题").tag(2)
+                Text("PR").tag(3)
+                Text("构建").tag(4)
+                Text("发行").tag(5)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            Group {
+                switch tab {
+                case 0: RepoInfoView(repo: repo)
+                case 1: FilesView(repo: repo, path: "", embedded: true)
+                case 2: IssueListView(repoFullName: repo.fullName, pulls: false)
+                case 3: IssueListView(repoFullName: repo.fullName, pulls: true)
+                case 4: ActionsView(repo: repo)
+                default: ReleasesView(repo: repo)
+                }
+            }
+        }
         .navigationTitle(repo.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if let u = URL(string: repo.htmlUrl) {
+                    Link(destination: u) { Image(systemName: "safari") }
+                }
+            }
+        }
+    }
+}
+
+struct RepoInfoView: View {
+    let repo: Repo
+    @State private var readme: String?
+    @State private var loading = true
+    @State private var starred = false
+    @State private var zh = false
+    @State private var errorMsg: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let d = repo.description, !d.isEmpty {
+                    Text(d)
+                }
+                HStack(spacing: 16) {
+                    Label("\(repo.stargazersCount)", systemImage: "star")
+                    Label("\(repo.forksCount)", systemImage: "arrow.triangle.branch")
+                    Label("\(repo.openIssuesCount)", systemImage: "exclamationmark.circle")
+                }
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+                HStack {
+                    Button {
+                        Task { await toggleStar() }
+                    } label: {
+                        Label(starred ? "取消星标" : "加星标", systemImage: starred ? "star.fill" : "star")
+                    }
+                    .buttonStyle(.bordered)
+                    if let u = URL(string: "\(repo.htmlUrl)/archive/refs/heads/\(repo.defaultBranch ?? "main").zip") {
+                        Link(destination: u) {
+                            Label("下载 ZIP", systemImage: "arrow.down.circle")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                if let e = errorMsg {
+                    Text(e).font(.footnote).foregroundColor(.red)
+                }
+
+                TranslateBar(on: $zh)
+                Divider()
+                if loading {
+                    ProgressView()
+                } else if let r = readme {
+                    TranslatableMarkdown(text: r, translate: zh)
+                } else {
+                    Text("没有 README").foregroundColor(.secondary)
+                }
+            }
+            .padding()
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        starred = await API.shared.exists("/user/starred/\(repo.fullName)")
+        do {
+            let r = try await API.shared.raw("/repos/\(repo.fullName)/readme")
+            readme = r.isEmpty ? nil : r
+        } catch {
+            readme = nil
+        }
+        loading = false
+    }
+
+    private func toggleStar() async {
+        errorMsg = nil
+        do {
+            try await API.shared.action("/user/starred/\(repo.fullName)", method: starred ? "DELETE" : "PUT")
+            starred.toggle()
+        } catch {
+            errorMsg = errText(error)
+        }
+    }
+}
+
+// MARK: - 文件浏览
+
+struct FilesView: View {
+    let repo: Repo
+    let path: String
+    let embedded: Bool
+    @State private var items: [ContentItem] = []
+    @State private var loading = true
+    @State private var errorMsg: String?
+
+    var body: some View {
+        List {
+            if let e = errorMsg {
+                Text(e).font(.footnote).foregroundColor(.red)
+            }
+            ForEach(items) { it in
+                if it.type == "dir" {
+                    NavigationLink(destination: FilesView(repo: repo, path: it.path, embedded: false)) {
+                        Label(it.name, systemImage: "folder")
+                    }
+                } else {
+                    NavigationLink(destination: FileView(repo: repo, item: it)) {
+                        Label(it.name, systemImage: "doc.text")
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .overlay { if loading { ProgressView() } }
+        .navigationTitle(embedded ? repo.name : (path as NSString).lastPathComponent)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+    }
+
+    private func load() async {
+        do {
+            let url = path.isEmpty
+                ? "/repos/\(repo.fullName)/contents"
+                : "/repos/\(repo.fullName)/contents/\(encPath(path))"
+            let list: [ContentItem] = try await API.shared.get(url)
+            items = list.sorted { a, b in
+                if (a.type == "dir") != (b.type == "dir") { return a.type == "dir" }
+                return a.name.lowercased() < b.name.lowercased()
+            }
+        } catch {
+            errorMsg = errText(error)
+        }
+        loading = false
+    }
+}
+
+struct FileView: View {
+    let repo: Repo
+    let item: ContentItem
+    @State private var text: String?
+    @State private var loading = true
+    @State private var errorMsg: String?
+    @State private var zh = false
+
+    private var isMD: Bool {
+        let n = item.name.lowercased()
+        return n.hasSuffix(".md") || n.hasSuffix(".markdown")
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if isMD { TranslateBar(on: $zh) }
+                if loading {
+                    ProgressView()
+                } else if let t = text, !t.isEmpty {
+                    if isMD {
+                        TranslatableMarkdown(text: t, translate: zh)
+                    } else {
+                        ScrollView(.horizontal) {
+                            Text(t)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                } else {
+                    Text(errorMsg ?? "无法预览此文件（二进制或为空）").foregroundColor(.secondary)
+                }
+            }
+            .padding()
+        }
+        .navigationTitle(item.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await load() }
+    }
+
+    private func load() async {
+        do {
+            let t = try await API.shared.raw("/repos/\(repo.fullName)/contents/\(encPath(item.path))")
+            text = String(t.prefix(60_000))
+        } catch {
+            errorMsg = errText(error)
+        }
+        loading = false
     }
 }

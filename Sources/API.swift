@@ -2,6 +2,8 @@ import Foundation
 import Security
 import SwiftUI
 
+// MARK: - 错误
+
 enum APIError: LocalizedError {
     case http(Int, String)
     case badURL
@@ -10,8 +12,8 @@ enum APIError: LocalizedError {
         switch self {
         case .http(let code, let msg):
             if code == 401 { return "令牌无效或已过期，请重新登录" }
-            if code == 404 { return "未找到，或没有权限访问(404)" }
-            if code == 403 { return "没有权限或请求过于频繁(403)：\(msg)" }
+            if code == 404 { return "未找到，或没有权限访问（404）" }
+            if code == 403 { return "没有权限或请求过于频繁（403）：\(msg)" }
             return "GitHub 返回 \(code)：\(msg)"
         case .badURL:
             return "地址无效"
@@ -25,6 +27,8 @@ func errText(_ e: Error) -> String? {
     return e.localizedDescription
 }
 
+// MARK: - 小工具
+
 private let isoFormatter = ISO8601DateFormatter()
 
 func relTime(_ iso: String?) -> String {
@@ -35,11 +39,13 @@ func relTime(_ iso: String?) -> String {
     return f.localizedString(for: d, relativeTo: Date())
 }
 
+/// 用于查询参数
 func enc(_ s: String) -> String {
     let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
     return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
 }
 
+/// 用于路径（保留 /）
 func encPath(_ s: String) -> String {
     s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s
 }
@@ -60,6 +66,8 @@ struct ActivityView: UIViewControllerRepresentable {
     }
     func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
+
+// MARK: - 钥匙串
 
 enum Keychain {
     private static let service = "com.lin.githubcn"
@@ -102,6 +110,8 @@ enum Keychain {
     }
 }
 
+// MARK: - 重定向捕获（下载构建产物用）
+
 final class RedirectCatcher: NSObject, URLSessionTaskDelegate {
     var location: URL?
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -112,6 +122,8 @@ final class RedirectCatcher: NSObject, URLSessionTaskDelegate {
         completionHandler(nil)
     }
 }
+
+// MARK: - API
 
 final class API {
     static let shared = API()
@@ -191,6 +203,8 @@ final class API {
         } catch {}
         return false
     }
+
+    // MARK: 下载
 
     func downloadArtifact(repo: String, id: Int, name: String) async throws -> URL {
         let req = try request("/repos/\(repo)/actions/artifacts/\(id)/zip")

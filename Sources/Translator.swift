@@ -1,8 +1,11 @@
 import Foundation
 
+/// 翻译服务。默认使用 Google 的 gtx 接口（大陆需要代理才能访问）。
+/// 想换成别的服务，只改 translateOne 即可。
 enum Translator {
     static let targetLang = "zh-CN"
 
+    /// 分批并发（每批 6 条），避免一次发出太多请求
     static func translate(_ texts: [String]) async -> [String] {
         var out = texts
         var start = 0
