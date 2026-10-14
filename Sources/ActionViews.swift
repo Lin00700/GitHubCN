@@ -121,6 +121,10 @@ struct RunDetailView: View {
     @State private var share: ShareItem?
     @State private var errorMsg: String?
     @State private var info: String?
+    @State private var buildErrors: [BuildError] = []
+    @State private var analyzing = false
+    @State private var analyzed = false
+    @State private var aiContext = ""
 
     var body: some View {
         List {
@@ -129,6 +133,48 @@ struct RunDetailView: View {
                 Button("重新运行") { Task { await rerun() } }
                 if let u = URL(string: run.htmlUrl) {
                     Link("在 Safari 查看日志", destination: u)
+                }
+            }
+            if run.conclusion == "failure" {
+                Section(header: Text("构建错误")) {
+                    Button {
+                        Task { await analyze() }
+                    } label: {
+                        HStack {
+                            if analyzing { ProgressView() }
+                            Text(analyzed ? "重新分析报错" : "分析报错（读取构建日志）")
+                        }
+                    }
+                    .disabled(analyzing)
+                    ForEach(buildErrors) { e in
+                        if let p = e.path {
+                            NavigationLink(
+                                destination: FileView(
+                                    repo: repo,
+                                    item: ContentItem(name: (p as NSString).lastPathComponent, path: p, type: "file", size: nil, sha: nil),
+                                    highlightLine: e.line
+                                )
+                            ) {
+                                BuildErrorRow(e: e)
+                            }
+                        } else {
+                            BuildErrorRow(e: e)
+                        }
+                    }
+                    if analyzed && buildErrors.isEmpty {
+                        Text("日志里没有找到 error: 行").foregroundColor(.secondary)
+                    }
+                    if !buildErrors.isEmpty {
+                        NavigationLink(
+                            destination: AIChatView(
+                                contextTitle: "构建报错",
+                                contextText: aiContext,
+                                quickPrompts: ["根据报错给出修复后的完整代码", "解释这些报错的原因", "最小改动怎么修？"]
+                            )
+                        ) {
+                            Label("让 AI 分析并给出修复", systemImage: "sparkles")
+                        }
+                    }
                 }
             }
             Section(header: Text("构建产物")) {
@@ -174,6 +220,57 @@ struct RunDetailView: View {
             ActivityView(items: [item.url])
         }
         .task { await load() }
+    }
+
+    private func analyze() async {
+        analyzing = true
+        errorMsg = nil
+        do {
+            let jl: JobList = try await API.shared.get("/repos/\(repo.fullName)/actions/runs/\(run.id)/jobs")
+            let failed = jl.jobs.filter { $0.conclusion == "failure" }
+            let targets = Array((failed.isEmpty ? jl.jobs : failed).prefix(2))
+            var found: [BuildError] = []
+            for j in targets {
+                let log = try await API.shared.jobLog(repo: repo.fullName, jobId: j.id)
+                found += BuildErrorParser.parse(log)
+            }
+            var seen = Set<String>()
+            var unique: [BuildError] = []
+            for e in found {
+                let key = "\(e.path ?? "")|\(e.line ?? 0)|\(e.message)"
+                if seen.insert(key).inserted { unique.append(e) }
+            }
+            buildErrors = Array(unique.prefix(30))
+            analyzed = true
+            aiContext = await buildAIContext(buildErrors)
+        } catch {
+            errorMsg = errText(error)
+        }
+        analyzing = false
+    }
+
+    private func buildAIContext(_ errs: [BuildError]) async -> String {
+        var t = "GitHub Actions 构建失败，仓库 \(repo.fullName)。编译错误：\n"
+        for e in errs.prefix(15) {
+            let loc = e.line.map { ":\($0)" } ?? ""
+            t += "- \(e.path ?? "")\(loc) \(e.message)\n"
+        }
+        var cache: [String: [String]] = [:]
+        t += "\n相关代码（行号: 内容）：\n"
+        for e in errs.prefix(8) {
+            guard let p = e.path, let l = e.line else { continue }
+            if cache[p] == nil {
+                let src = (try? await API.shared.raw("/repos/\(repo.fullName)/contents/\(encPath(p))")) ?? ""
+                cache[p] = src.components(separatedBy: "\n")
+            }
+            guard let lines = cache[p], !lines.isEmpty else { continue }
+            let lo = max(l - 6, 1)
+            let hi = min(l + 6, lines.count)
+            if lo > hi { continue }
+            t += "\n[\(p)]\n"
+            for n in lo...hi { t += "\(n): \(lines[n - 1])\n" }
+        }
+        return String(t.prefix(12000))
     }
 
     private func load() async {

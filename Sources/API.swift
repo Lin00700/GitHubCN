@@ -207,6 +207,30 @@ final class API {
         return false
     }
 
+    /// 带返回值的写请求（Git Data API 用）
+    func write<T: Decodable>(_ path: String, method: String, body: [String: Any]?) async throws -> T {
+        let data = try await send(try request(path, method: method, body: body))
+        return try decoder.decode(T.self, from: data)
+    }
+
+    /// 读取某个 job 的完整日志（会先 302 跳转到临时地址）
+    func jobLog(repo: String, jobId: Int) async throws -> String {
+        let req = try request("/repos/\(repo)/actions/jobs/\(jobId)/logs")
+        let catcher = RedirectCatcher()
+        let (data0, resp) = try await session.data(for: req, delegate: catcher)
+        var target: URL? = catcher.location
+        if let http = resp as? HTTPURLResponse {
+            if http.statusCode >= 400 { throw APIError.http(http.statusCode, "日志不可用或已过期") }
+            if target == nil, let l = http.value(forHTTPHeaderField: "Location") { target = URL(string: l) }
+            if target == nil, (200..<300).contains(http.statusCode) {
+                return String(data: data0, encoding: .utf8) ?? ""
+            }
+        }
+        guard let loc = target else { throw APIError.http(0, "无法获取日志地址") }
+        let (data, _) = try await URLSession.shared.data(from: loc)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
     // MARK: 下载
 
     func downloadArtifact(repo: String, id: Int, name: String) async throws -> URL {

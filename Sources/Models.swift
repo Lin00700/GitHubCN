@@ -78,6 +78,7 @@ struct ContentItem: Codable, Identifiable, Hashable {
     let path: String
     let type: String
     let size: Int?
+    let sha: String?
     var id: String { path }
 }
 
