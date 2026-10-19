@@ -1,13 +1,21 @@
 import SwiftUI
 
-// MARK: - 对话会话
+// MARK: - 对话会话（支持工具调用 Agent）
 
 @MainActor
 final class ChatSession: ObservableObject {
     @Published var messages: [ChatMsg] = []
     @Published var sending = false
     @Published var errorMsg: String?
+    /// 等待用户确认的写操作
+    @Published var pendingWrites: [AIToolCall] = []
+    @Published var agentStatus: String?
+
     private var task: Task<Void, Never>?
+    /// 发给模型的完整历史（含 tool 消息），与 UI messages 分离
+    private var wireMessages: [[String: Any]] = []
+    private var systemPromptCache = ""
+    private var confirmContinuation: CheckedContinuation<[AIToolResult], Never>?
 
     func send(_ text: String, system: String) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -17,40 +25,225 @@ final class ChatSession: ObservableObject {
             return
         }
         errorMsg = nil
+        systemPromptCache = system + agentSystemSuffix
         messages.append(ChatMsg(role: "user", content: t))
+        wireMessages.append(["role": "user", "content": t])
         messages.append(ChatMsg(role: "assistant", content: ""))
-        let history = Array(messages.dropLast())
         let key = AIStore.shared.key(for: p)
         sending = true
+        agentStatus = "思考中…"
         task = Task {
-            do {
-                try await AIClient.stream(profile: p, key: key, messages: history, system: system) { piece in
-                    self.appendDelta(piece)
-                }
-            } catch {
-                if !(error is CancellationError) {
-                    self.errorMsg = errText(error)
-                }
-            }
+            await runAgent(profile: p, key: key)
             self.sending = false
-            if let last = self.messages.last, last.role == "assistant", last.content.isEmpty {
+            self.agentStatus = nil
+            if let last = self.messages.last, last.role == "assistant", last.content.isEmpty,
+               self.pendingWrites.isEmpty {
                 self.messages.removeLast()
             }
         }
     }
 
-    func stop() { task?.cancel() }
+    func stop() {
+        task?.cancel()
+        if let cont = confirmContinuation {
+            confirmContinuation = nil
+            cont.resume(returning: pendingWrites.map {
+                AIToolResult(toolCallId: $0.id, name: $0.name, content: "用户取消了操作", isError: true)
+            })
+        }
+        pendingWrites = []
+        sending = false
+        agentStatus = nil
+    }
 
     func clear() {
         task?.cancel()
+        if let cont = confirmContinuation {
+            confirmContinuation = nil
+            cont.resume(returning: [])
+        }
         messages = []
+        wireMessages = []
+        pendingWrites = []
         errorMsg = nil
         sending = false
+        agentStatus = nil
     }
 
-    private func appendDelta(_ s: String) {
-        if !messages.isEmpty {
-            messages[messages.count - 1].content += s
+    /// 用户确认执行写操作
+    func approvePending() {
+        let calls = pendingWrites
+        pendingWrites = []
+        Task {
+            var results: [AIToolResult] = []
+            for c in calls {
+                agentStatus = "执行：\(AITools.humanSummary(c))"
+                results.append(await AITools.execute(c))
+            }
+            confirmContinuation?.resume(returning: results)
+            confirmContinuation = nil
+        }
+    }
+
+    /// 用户拒绝写操作
+    func rejectPending() {
+        let calls = pendingWrites
+        pendingWrites = []
+        let results = calls.map {
+            AIToolResult(toolCallId: $0.id, name: $0.name, content: "用户拒绝执行此操作", isError: true)
+        }
+        confirmContinuation?.resume(returning: results)
+        confirmContinuation = nil
+    }
+
+    private var agentSystemSuffix: String {
+        """
+
+
+你可以使用工具直接操作用户的 GitHub（通过用户已登录的令牌）。
+规则：
+1. 需要真实数据时优先调用工具，不要编造仓库/议题/文件内容。
+2. 写操作（创建议题、评论、提交文件、删除、触发构建等）会先让用户确认，你只需正常调用工具。
+3. repo 参数统一用 owner/name 格式。
+4. 用简体中文回复，简洁；代码用 Markdown 代码块。
+5. 一次可以并行调用多个只读工具；写操作尽量说明意图。
+"""
+    }
+
+    private func runAgent(profile p: AIProfile, key: String) async {
+        var rounds = 0
+        while rounds < 8 {
+            rounds += 1
+            if Task.isCancelled { return }
+            do {
+                agentStatus = rounds == 1 ? "思考中…" : "继续处理（第 \(rounds) 轮）…"
+                let turn = try await AIClient.agentTurn(
+                    profile: p,
+                    key: key,
+                    messages: wireMessages,
+                    system: systemPromptCache
+                )
+
+                // 更新最后一条 assistant 气泡
+                if !turn.text.isEmpty {
+                    appendAssistantText(turn.text)
+                }
+
+                if turn.toolCalls.isEmpty {
+                    // 结束
+                    if turn.text.isEmpty {
+                        appendAssistantText("（没有返回内容）")
+                    }
+                    return
+                }
+
+                // 记录 assistant 带 tool_calls 的消息
+                if let raw = turn.rawAssistant {
+                    if p.format == .openai {
+                        wireMessages.append(raw)
+                    } else {
+                        wireMessages.append(raw)
+                    }
+                }
+
+                // 展示工具意图
+                let summary = turn.toolCalls.map { "• \(AITools.humanSummary($0))" }.joined(separator: "\n")
+                messages.append(ChatMsg(
+                    role: "assistant",
+                    content: "将执行：\n\(summary)",
+                    isLocalNotice: true
+                ))
+
+                let reads = turn.toolCalls.filter { AITools.kind(of: $0.name) == .read }
+                let writes = turn.toolCalls.filter { AITools.kind(of: $0.name) == .write }
+
+                var results: [AIToolResult] = []
+
+                // 只读直接执行
+                for c in reads {
+                    if Task.isCancelled { return }
+                    agentStatus = "执行：\(AITools.humanSummary(c))"
+                    let r = await AITools.execute(c)
+                    results.append(r)
+                    messages.append(ChatMsg(
+                        role: "tool",
+                        content: r.isError ? "❌ \(r.content)" : "✅ \(String(r.content.prefix(500)))",
+                        toolCallId: r.toolCallId,
+                        toolName: r.name,
+                        isLocalNotice: true
+                    ))
+                }
+
+                // 写操作等待确认
+                if !writes.isEmpty {
+                    agentStatus = "等待确认写操作…"
+                    pendingWrites = writes
+                    let writeResults: [AIToolResult] = await withCheckedContinuation { cont in
+                        confirmContinuation = cont
+                    }
+                    if Task.isCancelled { return }
+                    for r in writeResults {
+                        results.append(r)
+                        messages.append(ChatMsg(
+                            role: "tool",
+                            content: r.isError ? "❌ \(r.content)" : "✅ \(r.content)",
+                            toolCallId: r.toolCallId,
+                            toolName: r.name,
+                            isLocalNotice: true
+                        ))
+                    }
+                }
+
+                // 把工具结果写回 wire
+                appendToolResultsToWire(results, format: p.format)
+
+                // 准备下一条空 assistant 气泡
+                messages.append(ChatMsg(role: "assistant", content: ""))
+
+            } catch {
+                if !(error is CancellationError) {
+                    self.errorMsg = errText(error)
+                }
+                return
+            }
+        }
+        appendAssistantText("已达到最大工具调用轮数，请根据上方结果继续提问。")
+    }
+
+    private func appendAssistantText(_ s: String) {
+        if let i = messages.lastIndex(where: { $0.role == "assistant" && !$0.isLocalNotice }) {
+            if messages[i].content.isEmpty {
+                messages[i].content = s
+            } else {
+                messages[i].content += s
+            }
+        } else {
+            messages.append(ChatMsg(role: "assistant", content: s))
+        }
+    }
+
+    private func appendToolResultsToWire(_ results: [AIToolResult], format: AIFormat) {
+        switch format {
+        case .openai:
+            for r in results {
+                wireMessages.append([
+                    "role": "tool",
+                    "tool_call_id": r.toolCallId,
+                    "content": r.content
+                ])
+            }
+        case .anthropic:
+            // Anthropic: user message with tool_result blocks
+            var blocks: [[String: Any]] = []
+            for r in results {
+                blocks.append([
+                    "type": "tool_result",
+                    "tool_use_id": r.toolCallId,
+                    "content": r.content,
+                    "is_error": r.isError
+                ])
+            }
+            wireMessages.append(["role": "user", "content": blocks])
         }
     }
 }
@@ -60,7 +253,12 @@ final class ChatSession: ObservableObject {
 struct AIChatView: View {
     var contextTitle: String? = nil
     var contextText: String? = nil
-    var quickPrompts: [String] = ["解释一个 GitHub Actions 报错", "帮我写 Swift 项目的 .gitignore", "SideStore 刷新失败怎么排查？"]
+    var quickPrompts: [String] = [
+        "列出我最近更新的仓库",
+        "帮我查看某个仓库的构建是否失败",
+        "在指定仓库创建一条议题",
+        "解释一个 GitHub Actions 报错"
+    ]
 
     @StateObject private var session = ChatSession()
     @ObservedObject private var store = AIStore.shared
@@ -84,17 +282,32 @@ struct AIChatView: View {
                         ForEach(session.messages) { m in
                             bubble(m).id(m.id)
                         }
+                        if let st = session.agentStatus {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text(st).font(.footnote).foregroundColor(Theme.textDim)
+                            }
+                            .neonCard()
+                        }
                         if let e = session.errorMsg {
                             Text(e).font(.footnote).foregroundColor(.red).neonCard()
                         }
                     }
                     .padding()
                 }
+                .onChange(of: session.messages.count) { _ in
+                    if let last = session.messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
                 .onChange(of: session.messages.last?.content) { _ in
                     if let last = session.messages.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
+            }
+            if !session.pendingWrites.isEmpty {
+                confirmBar
             }
             inputBar
         }
@@ -108,6 +321,28 @@ struct AIChatView: View {
                 }
             }
         }
+    }
+
+    private var confirmBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("以下操作会修改你的 GitHub，请确认：")
+                .font(.footnote.bold())
+            ForEach(session.pendingWrites) { c in
+                Text("• \(AITools.humanSummary(c))")
+                    .font(.caption)
+                    .foregroundColor(Theme.textDim)
+            }
+            HStack {
+                Button("拒绝") { session.rejectPending() }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button("确认执行") { session.approvePending() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .background(Theme.card)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(Theme.purple.opacity(0.5)), alignment: .top)
     }
 
     private var providerBar: some View {
@@ -143,9 +378,12 @@ struct AIChatView: View {
 
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("AI 助手", systemImage: "sparkles")
+            Label("AI 助手 · 可操作 GitHub", systemImage: "sparkles")
                 .font(.headline)
                 .foregroundStyle(Theme.gradient)
+            Text("已支持：列仓库/文件、读写议题、提交代码、触发构建等。写操作会先让你确认。\n请使用支持 tools / function calling 的模型（如 GPT-4o、Claude、DeepSeek 等）。")
+                .font(.footnote)
+                .foregroundColor(Theme.textDim)
             if let t = contextTitle {
                 Text("已带入「\(t)」的内容，可以直接提问。")
                     .font(.footnote)
@@ -188,6 +426,19 @@ struct AIChatView: View {
                     .background(Theme.gradient)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
+        } else if m.role == "tool" || m.isLocalNotice {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: m.role == "tool" ? "wrench.and.screwdriver" : "info.circle")
+                    .font(.caption)
+                    .foregroundColor(Theme.cyan)
+                Text(m.content)
+                    .font(.caption)
+                    .foregroundColor(Theme.textDim)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Theme.card.opacity(0.8)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.cyan.opacity(0.25), lineWidth: 1))
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 if m.content.isEmpty {
@@ -211,10 +462,11 @@ struct AIChatView: View {
 
     private var inputBar: some View {
         HStack(spacing: 8) {
-            TextField("向 AI 提问…", text: $input)
+            TextField("向 AI 提问或下达操作指令…", text: $input)
                 .submitLabel(.send)
                 .onSubmit { sendInput() }
                 .neonField()
+                .disabled(!session.pendingWrites.isEmpty)
             Button {
                 if session.sending { session.stop() } else { sendInput() }
             } label: {
@@ -225,7 +477,7 @@ struct AIChatView: View {
                     .background(Theme.gradient)
                     .clipShape(Circle())
             }
-            .disabled(!session.sending && input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!session.sending && (input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !session.pendingWrites.isEmpty))
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -248,7 +500,7 @@ struct AISettingsView: View {
         List {
             Section(
                 header: Text("服务商"),
-                footer: Text("支持任何 OpenAI 兼容接口（地址填到 /v1 为止）和 Anthropic 接口。API Key 只保存在本机钥匙串。")
+                footer: Text("支持任何 OpenAI 兼容接口（地址填到 /v1 为止）和 Anthropic 接口。API Key 只保存在本机钥匙串。\nAgent 操作需要模型支持 tools / function calling。")
             ) {
                 ForEach(store.profiles) { p in
                     NavigationLink(destination: AIProfileEditor(profile: p)) {
