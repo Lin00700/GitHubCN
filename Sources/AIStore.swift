@@ -37,7 +37,7 @@ let aiPresets: [AIPreset] = [
     AIPreset(name: "Moonshot Kimi", baseURL: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k", format: .openai),
     AIPreset(name: "阿里百炼", baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", format: .openai),
     AIPreset(name: "Google Gemini", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.0-flash", format: .openai),
-    AIPreset(name: "Anthropic Claude", baseURL: "https://api.anthropic.com", model: "claude-sonnet-5-5", format: .anthropic),
+    AIPreset(name: "Anthropic Claude", baseURL: "https://api.anthropic.com", model: "claude-sonnet-4-5", format: .anthropic),
     AIPreset(name: "本地 Ollama", baseURL: "http://127.0.0.1:11434/v1", model: "llama3", format: .openai)
 ]
 
@@ -94,12 +94,21 @@ final class AIStore: ObservableObject {
     }
 }
 
-// MARK: - 请求
+// MARK: - 消息与错误
 
 struct ChatMsg: Identifiable {
     let id = UUID()
+    /// user / assistant / tool / system
     var role: String
     var content: String
+    /// OpenAI tool_calls 原始结构（assistant 消息）
+    var toolCalls: [[String: Any]]? = nil
+    /// 工具结果对应的 call id
+    var toolCallId: String? = nil
+    /// 工具名（展示用）
+    var toolName: String? = nil
+    /// 是否为界面上的系统提示卡片（不发给模型）
+    var isLocalNotice: Bool = false
 }
 
 enum AIError: LocalizedError {
@@ -112,6 +121,14 @@ enum AIError: LocalizedError {
         case .http(let code, let msg): return "AI 服务返回 \(code)：\(msg)"
         }
     }
+}
+
+/// 一轮带工具的模型回复
+struct AIAgentTurn {
+    var text: String
+    var toolCalls: [AIToolCall]
+    /// 用于下一轮请求的原始 assistant 消息（含 tool_calls）
+    var rawAssistant: [String: Any]?
 }
 
 enum AIClient {
@@ -161,7 +178,7 @@ enum AIClient {
         return arr.compactMap { $0["id"] as? String }.sorted()
     }
 
-    /// 流式对话，每收到一段文字就回调一次（回调在主线程）
+    /// 流式对话（纯文本，无工具）
     static func stream(profile p: AIProfile, key: String, messages: [ChatMsg], system: String?,
                        onDelta: @MainActor @Sendable (String) -> Void) async throws {
         guard let url = URL(string: root(p) + (p.format == .openai ? "/chat/completions" : "/messages")) else {
@@ -212,12 +229,94 @@ enum AIClient {
                 await onDelta(piece)
             }
         }
-        // 有些服务忽略 stream，直接返回完整 JSON
         if !got,
            let d = raw.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
            let full = fullText(obj, p.format), !full.isEmpty {
             await onDelta(full)
+        }
+    }
+
+    /// 带工具的非流式一轮（用于 Agent）
+    static func agentTurn(profile p: AIProfile, key: String,
+                          messages: [[String: Any]], system: String?) async throws -> AIAgentTurn {
+        guard let url = URL(string: root(p) + (p.format == .openai ? "/chat/completions" : "/messages")) else {
+            throw AIError.badURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 120
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyAuth(&req, p, key)
+
+        var body: [String: Any] = ["model": p.model, "stream": false]
+        switch p.format {
+        case .openai:
+            var msgs = messages
+            if let s = system, !s.isEmpty {
+                msgs.insert(["role": "system", "content": s], at: 0)
+            }
+            body["messages"] = msgs
+            body["tools"] = AITools.openAIToolsJSON()
+            body["tool_choice"] = "auto"
+        case .anthropic:
+            body["max_tokens"] = 4096
+            if let s = system, !s.isEmpty { body["system"] = s }
+            body["messages"] = messages
+            body["tools"] = AITools.anthropicToolsJSON()
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw AIError.http(http.statusCode, extractMessage(String(data: data, encoding: .utf8) ?? ""))
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIError.http(0, "无法解析 AI 响应")
+        }
+        return parseAgentTurn(obj, p.format)
+    }
+
+    private static func parseAgentTurn(_ obj: [String: Any], _ f: AIFormat) -> AIAgentTurn {
+        switch f {
+        case .openai:
+            guard let choices = obj["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let msg = first["message"] as? [String: Any] else {
+                return AIAgentTurn(text: "", toolCalls: [], rawAssistant: nil)
+            }
+            let text = msg["content"] as? String ?? ""
+            var calls: [AIToolCall] = []
+            if let tcs = msg["tool_calls"] as? [[String: Any]] {
+                for tc in tcs {
+                    let id = tc["id"] as? String ?? UUID().uuidString
+                    let fn = tc["function"] as? [String: Any] ?? [:]
+                    let name = fn["name"] as? String ?? ""
+                    let args = fn["arguments"] as? String ?? "{}"
+                    calls.append(AIToolCall(id: id, name: name, argumentsJSON: args))
+                }
+            }
+            return AIAgentTurn(text: text, toolCalls: calls, rawAssistant: msg)
+
+        case .anthropic:
+            let content = obj["content"] as? [[String: Any]] ?? []
+            var text = ""
+            var calls: [AIToolCall] = []
+            for block in content {
+                let type = block["type"] as? String ?? ""
+                if type == "text" {
+                    text += block["text"] as? String ?? ""
+                } else if type == "tool_use" {
+                    let id = block["id"] as? String ?? UUID().uuidString
+                    let name = block["name"] as? String ?? ""
+                    let input = block["input"] as? [String: Any] ?? [:]
+                    let argsData = (try? JSONSerialization.data(withJSONObject: input)) ?? Data()
+                    let args = String(data: argsData, encoding: .utf8) ?? "{}"
+                    calls.append(AIToolCall(id: id, name: name, argumentsJSON: args))
+                }
+            }
+            // Anthropic 下一轮需要完整 content 数组
+            return AIAgentTurn(text: text, toolCalls: calls, rawAssistant: ["role": "assistant", "content": content])
         }
     }
 
