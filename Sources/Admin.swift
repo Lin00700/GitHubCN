@@ -613,10 +613,12 @@ struct VariablesView: View {
                     .swipeActions { Button("删除", role: .destructive) { Task { await remove(v) } } }
                 }
             }
-            Section("新建变量") {
+            Section {
                 TextField("名称", text: $name).textInputAutocapitalization(.never)
                 TextField("值", text: $value)
                 Button("保存") { Task { await add() } }.disabled(name.isEmpty)
+            } header: {
+                Text("新建变量")
             } footer: {
                 Text("Actions 密钥的值不能通过 API 读出，只能在下面的「密钥名称」里看到名字。变量的值可以读写。")
             }

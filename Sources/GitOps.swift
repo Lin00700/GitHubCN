@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Git Data API 的响应模型
 
-struct GitObj: Codable { let sha: String }
+struct GitObj: Codable, Hashable { let sha: String }
 struct GitRef: Codable { let object: GitObj }
 struct GitCommitInfo: Codable { let sha: String; let tree: GitObj }
 struct GitSha: Codable { let sha: String }

@@ -865,6 +865,7 @@ struct DependabotAlert: Codable, Identifiable, Hashable {
     let createdAt: String?
     let dependency: DepInfo?
     let securityAdvisory: Advisory?
+    var id: Int { number }
 }
 
 struct SecretAlert: Codable, Identifiable, Hashable {
@@ -873,6 +874,7 @@ struct SecretAlert: Codable, Identifiable, Hashable {
     let secretType: String?
     let htmlUrl: String?
     let createdAt: String?
+    var id: Int { number }
 }
 
 struct ScanRule: Codable, Hashable {
@@ -887,6 +889,7 @@ struct CodeScanAlert: Codable, Identifiable, Hashable {
     let htmlUrl: String?
     let createdAt: String?
     let rule: ScanRule?
+    var id: Int { number }
 }
 
 struct GlobalAdvisory: Codable, Identifiable, Hashable {
