@@ -232,14 +232,9 @@ struct TranslatableMarkdown: View {
 struct TranslateBar: View {
     @Binding var on: Bool
     var body: some View {
-        HStack {
-            Image(systemName: "character.bubble")
-            Text("翻译为中文")
-            Spacer()
-            Toggle("", isOn: $on).labelsHidden()
+        Toggle(isOn: $on) {
+            Label("翻译为中文", systemImage: "character.bubble")
         }
-        .padding(10)
-        .background(Theme.card)
-        .cornerRadius(10)
+        .font(.subheadline)
     }
 }

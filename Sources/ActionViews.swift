@@ -31,6 +31,12 @@ struct ActionsView: View {
                 NavigationLink(destination: RunDetailView(repo: repo, run: r)) {
                     RunRow(run: r)
                 }
+                .swipeActions {
+                    Button("重跑") { Task { await rerun(r) } }.tint(.blue)
+                    if r.status != "completed" {
+                        Button("取消", role: .destructive) { Task { await cancel(r) } }
+                    }
+                }
             }
         }
         .listStyle(.plain)
@@ -41,6 +47,8 @@ struct ActionsView: View {
                 Text("还没有构建记录").foregroundColor(.secondary)
             }
         }
+        .navigationTitle("行动")
+        .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .refreshable { await load() }
     }
@@ -57,6 +65,21 @@ struct ActionsView: View {
             workflows = w.workflows.filter { $0.state == "active" }
         }
         loading = false
+    }
+
+    private func rerun(_ r: Run) async {
+        do {
+            try await API.shared.action("/repos/\(repo.fullName)/actions/runs/\(r.id)/rerun", method: "POST")
+            info = "已重新运行 #\(r.runNumber ?? 0)"
+        } catch { errorMsg = errText(error) }
+    }
+
+    private func cancel(_ r: Run) async {
+        do {
+            try await API.shared.action("/repos/\(repo.fullName)/actions/runs/\(r.id)/cancel", method: "POST")
+            info = "已取消"
+            await load()
+        } catch { errorMsg = errText(error) }
     }
 
     private func dispatch(_ w: Workflow) async {
@@ -130,9 +153,15 @@ struct RunDetailView: View {
         List {
             Section {
                 RunRow(run: run)
+                NavigationLink("任务和日志") { RunJobsView(repo: repo, run: run) }
                 Button("重新运行") { Task { await rerun() } }
+                Button("只重跑失败的任务") { Task { await rerunFailed() } }
+                if run.status != "completed" {
+                    Button("取消", role: .destructive) { Task { await cancel() } }
+                }
+                Button("下载日志包") { Task { await downloadLogs() } }
                 if let u = URL(string: run.htmlUrl) {
-                    Link("在 Safari 查看日志", destination: u)
+                    Link("在 Safari 中打开", destination: u)
                 }
             }
             if run.conclusion == "failure" {
@@ -151,8 +180,9 @@ struct RunDetailView: View {
                             NavigationLink(
                                 destination: FileView(
                                     repo: repo,
-                                    item: ContentItem(name: (p as NSString).lastPathComponent, path: p, type: "file", size: nil, sha: nil),
-                                    highlightLine: e.line
+                                    item: ContentItem(name: (p as NSString).lastPathComponent, path: p, type: "file", size: nil, sha: nil, htmlUrl: nil, downloadUrl: nil),
+                                    highlightLine: e.line,
+                                    ref: run.headBranch ?? repo.defaultBranch ?? "main"
                                 )
                             ) {
                                 BuildErrorRow(e: e)
@@ -213,7 +243,6 @@ struct RunDetailView: View {
                 Section { Text(e).foregroundColor(.red) }
             }
         }
-        .neonBackground()
         .navigationTitle("运行 #\(run.runNumber ?? 0)")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $share) { item in
@@ -305,6 +334,33 @@ struct RunDetailView: View {
             errorMsg = errText(error)
         }
     }
+
+    private func rerunFailed() async {
+        errorMsg = nil
+        do {
+            try await API.shared.action("/repos/\(repo.fullName)/actions/runs/\(run.id)/rerun-failed-jobs", method: "POST")
+            info = "已重跑失败的任务"
+        } catch { errorMsg = errText(error) }
+    }
+
+    private func cancel() async {
+        errorMsg = nil
+        do {
+            try await API.shared.action("/repos/\(repo.fullName)/actions/runs/\(run.id)/cancel", method: "POST")
+            info = "已取消"
+        } catch { errorMsg = errText(error) }
+    }
+
+    private func downloadLogs() async {
+        errorMsg = nil
+        do {
+            let url = try await API.shared.downloadFollowingRedirect(
+                "/repos/\(repo.fullName)/actions/runs/\(run.id)/logs",
+                name: "run-\(run.id)-logs.zip"
+            )
+            share = ShareItem(url: url)
+        } catch { errorMsg = errText(error) }
+    }
 }
 
 // MARK: - 发行版
@@ -367,6 +423,16 @@ struct ReleasesView: View {
         .sheet(item: $share) { item in
             ActivityView(items: [item.url])
         }
+        .navigationTitle("发行版")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                NavigationLink { NewReleaseView(repo: repo) { Task { await load() } } } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("新建发行版")
+            }
+        }
         .task { await load() }
     }
 
@@ -390,5 +456,116 @@ struct ReleasesView: View {
             errorMsg = errText(error)
         }
         busy = nil
+    }
+}
+
+struct RunJobsView: View {
+    let repo: Repo
+    let run: Run
+    @State private var jobs: [Job] = []
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if let error { Text(error).foregroundStyle(.red) }
+            ForEach(jobs) { j in
+                NavigationLink { JobLogView(repo: repo, job: j) } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(j.name).font(.body)
+                        Text("\(j.status ?? "") \(j.conclusion ?? "")").font(.caption).foregroundStyle(.secondary)
+                        if let steps = j.steps {
+                            ForEach(steps) { s in
+                                Text("\(s.number). \(s.name) · \(s.conclusion ?? s.status ?? "")")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("任务")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            do {
+                let list: JobList = try await API.shared.get("/repos/\(repo.fullName)/actions/runs/\(run.id)/jobs")
+                jobs = list.jobs
+            } catch { self.error = errText(error) }
+        }
+    }
+}
+
+struct JobLogView: View {
+    let repo: Repo
+    let job: Job
+    @State private var text = ""
+    @State private var error: String?
+    @State private var loading = true
+
+    var body: some View {
+        ScrollView {
+            if loading { ProgressView().padding() }
+            if let error { Text(error).foregroundStyle(.red).padding() }
+            Text(text)
+                .font(.system(.caption2, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+        }
+        .navigationTitle(job.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            do {
+                text = try await API.shared.jobLog(repo: repo.fullName, jobId: job.id)
+                error = nil
+            } catch { self.error = errText(error) }
+            loading = false
+        }
+    }
+}
+
+struct NewReleaseView: View {
+    let repo: Repo
+    var onCreated: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var tag = ""
+    @State private var name = ""
+    @State private var bodyText = ""
+    @State private var pre = false
+    @State private var draft = false
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        Form {
+            TextField("标签，例如 v1.0.0", text: $tag).textInputAutocapitalization(.never).autocorrectionDisabled()
+            TextField("标题", text: $name)
+            TextField("说明", text: $bodyText, axis: .vertical).lineLimit(5...12)
+            Toggle("预发布", isOn: $pre)
+            Toggle("草稿", isOn: $draft)
+            if let error { Text(error).foregroundStyle(.red) }
+            Button { Task { await create() } } label: {
+                HStack { if busy { ProgressView() }; Text("发布") }
+            }
+            .disabled(busy || tag.isEmpty)
+        }
+        .navigationTitle("新建发行版")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func create() async {
+        busy = true
+        do {
+            let _: Release = try await API.shared.write("/repos/\(repo.fullName)/releases", method: "POST", body: [
+                "tag_name": tag,
+                "name": name.isEmpty ? tag : name,
+                "body": bodyText,
+                "draft": draft,
+                "prerelease": pre,
+                "target_commitish": repo.branch
+            ])
+            onCreated()
+            dismiss()
+        } catch { self.error = errText(error) }
+        busy = false
     }
 }
