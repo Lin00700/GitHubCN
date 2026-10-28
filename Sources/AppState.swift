@@ -6,12 +6,23 @@ final class AppState: ObservableObject {
     @Published var user: GHUser?
     @Published var loading = false
     @Published var error: String?
+    @Published var unreadCount = 0
 
     init() {
         if let t = Keychain.load(), !t.isEmpty {
             API.shared.token = t
             loggedIn = true
-            Task { await refreshUser() }
+            Task {
+                await refreshUser()
+                await refreshUnread()
+            }
+        }
+    }
+
+    func refreshUnread() async {
+        guard loggedIn else { unreadCount = 0; return }
+        if let notes: [Note] = try? await API.shared.get("/notifications?per_page=50") {
+            unreadCount = notes.count
         }
     }
 
@@ -34,6 +45,7 @@ final class AppState: ObservableObject {
             Keychain.save(t)
             user = u
             loggedIn = true
+            await refreshUnread()
         } catch {
             API.shared.token = ""
             self.error = errText(error) ?? "登录失败"
@@ -46,5 +58,6 @@ final class AppState: ObservableObject {
         API.shared.token = ""
         user = nil
         loggedIn = false
+        unreadCount = 0
     }
 }

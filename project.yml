@@ -2,7 +2,7 @@ name: GitHubCN
 options:
   bundleIdPrefix: com.lin
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -24,6 +24,7 @@ targets:
       properties:
         CFBundleDisplayName: GitHub 中文
         UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -36,3 +37,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lin.githubcn
+        TARGETED_DEVICE_FAMILY: "1,2"

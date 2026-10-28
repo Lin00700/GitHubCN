@@ -29,10 +29,25 @@ func errText(_ e: Error) -> String? {
 
 // MARK: - 小工具
 
-private let isoFormatter = ISO8601DateFormatter()
+private let isoFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime]
+    return f
+}()
+
+private let isoFractional: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+
+func parseISO(_ iso: String?) -> Date? {
+    guard let iso else { return nil }
+    return isoFractional.date(from: iso) ?? isoFormatter.date(from: iso)
+}
 
 func relTime(_ iso: String?) -> String {
-    guard let iso = iso, let d = isoFormatter.date(from: iso) else { return "" }
+    guard let d = parseISO(iso) else { return "" }
     let f = RelativeDateTimeFormatter()
     f.locale = Locale(identifier: "zh_CN")
     f.unitsStyle = .short
@@ -173,9 +188,30 @@ final class API {
         return data
     }
 
-    func get<T: Decodable>(_ path: String) async throws -> T {
-        let data = try await send(try request(path))
+    func get<T: Decodable>(_ path: String, accept: String = "application/vnd.github+json") async throws -> T {
+        let data = try await send(try request(path, accept: accept))
         return try decoder.decode(T.self, from: data)
+    }
+
+    func json(_ path: String, method: String = "GET", body: [String: Any]? = nil,
+              accept: String = "application/vnd.github+json") async throws -> Any {
+        let data = try await send(try request(path, method: method, body: body, accept: accept))
+        if data.isEmpty { return [:] }
+        return try JSONSerialization.jsonObject(with: data)
+    }
+
+    /// GraphQL。返回 data 对象；没有 data 时抛出第一条错误。
+    func gql(_ query: String, _ variables: [String: Any] = [:]) async throws -> [String: Any] {
+        var body: [String: Any] = ["query": query]
+        if !variables.isEmpty { body["variables"] = variables }
+        let data = try await send(try request("/graphql", method: "POST", body: body))
+        let obj = (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        let errors = obj["errors"] as? [[String: Any]] ?? []
+        if let dataObj = obj["data"] as? [String: Any] {
+            return dataObj
+        }
+        let msg = errors.first?["message"] as? String ?? "GraphQL 请求失败"
+        throw APIError.http(0, msg)
     }
 
     func raw(_ path: String) async throws -> String {
@@ -185,6 +221,14 @@ final class API {
 
     func post(_ path: String, body: [String: Any], method: String = "POST") async throws {
         _ = try await send(try request(path, method: method, body: body))
+    }
+
+    func put(_ path: String, body: [String: Any]) async throws {
+        _ = try await send(try request(path, method: "PUT", body: body))
+    }
+
+    func delete(_ path: String, body: [String: Any]? = nil) async throws {
+        _ = try await send(try request(path, method: "DELETE", body: body))
     }
 
     func action(_ path: String, method: String) async throws {
@@ -264,5 +308,39 @@ final class API {
         try? FileManager.default.removeItem(at: dest)
         try FileManager.default.moveItem(at: tmp, to: dest)
         return dest
+    }
+
+    func saveData(_ data: Data, name: String) throws -> URL {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: dest)
+        try data.write(to: dest)
+        return dest
+    }
+
+    /// 下载 API 原始内容（日志、源码、需登录的文件）。
+    func downloadAPIFile(_ path: String, name: String, accept: String = "application/vnd.github.raw+json") async throws -> URL {
+        let data = try await send(try request(path, accept: accept))
+        return try saveData(data, name: name)
+    }
+
+    /// 跟随 302（zipball、Actions 日志包）。
+    func downloadFollowingRedirect(_ path: String, name: String) async throws -> URL {
+        let req = try request(path)
+        let catcher = RedirectCatcher()
+        let (data0, resp) = try await session.data(for: req, delegate: catcher)
+        var target: URL? = catcher.location
+        if let http = resp as? HTTPURLResponse {
+            if http.statusCode >= 400 { throw APIError.http(http.statusCode, "无法下载") }
+            if target == nil, let l = http.value(forHTTPHeaderField: "Location") { target = URL(string: l) }
+            if target == nil, (200..<300).contains(http.statusCode) {
+                return try saveData(data0, name: name)
+            }
+        }
+        guard let loc = target else { throw APIError.http(0, "无法获取下载地址") }
+        let (tmp, resp2) = try await URLSession.shared.download(from: loc)
+        if let http = resp2 as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw APIError.http(http.statusCode, "下载失败")
+        }
+        return try moveToTemp(tmp, name: name)
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 enum FilesSheet: Identifiable {
@@ -20,7 +21,7 @@ enum FilesSheet: Identifiable {
 struct FilesView: View {
     let repo: Repo
     let path: String
-    let embedded: Bool
+    var ref: String
     @State private var items: [ContentItem] = []
     @State private var loading = true
     @State private var errorMsg: String?
@@ -93,7 +94,7 @@ struct FilesView: View {
             }
         )
         .sheet(item: $sheet) { s in
-            NavigationView {
+            NavigationStack {
                 switch s {
                 case .newFile:
                     NewFileSheet(repo: repo, dir: path) { Task { await load() } }
@@ -103,7 +104,6 @@ struct FilesView: View {
                     RenameSheet(repo: repo, item: it) { Task { await load() } }
                 }
             }
-            .preferredColorScheme(.dark)
         }
         .alert(
             "删除「\(deleting?.name ?? "")」？",
@@ -117,8 +117,7 @@ struct FilesView: View {
         } message: {
             Text("会提交一次删除，之后仍可以在 GitHub 的历史记录里恢复。")
         }
-        .neonBackground()
-        .navigationTitle(embedded ? repo.name : (path as NSString).lastPathComponent)
+        .navigationTitle(path.isEmpty ? "文件" : (path as NSString).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
     }
@@ -126,9 +125,9 @@ struct FilesView: View {
     @ViewBuilder
     private func destination(_ it: ContentItem) -> some View {
         if it.type == "dir" {
-            FilesView(repo: repo, path: it.path, embedded: false)
+            FilesView(repo: repo, path: it.path, ref: ref)
         } else {
-            FileView(repo: repo, item: it)
+            FileView(repo: repo, item: it, ref: ref)
         }
     }
 
@@ -199,9 +198,10 @@ struct FilesView: View {
 
     private func load() async {
         do {
-            let url = path.isEmpty
+            let base = path.isEmpty
                 ? "/repos/\(repo.fullName)/contents"
                 : "/repos/\(repo.fullName)/contents/\(encPath(path))"
+            let url = base + "?ref=\(enc(ref))"
             let list: [ContentItem] = try await API.shared.get(url)
             items = list.sorted { a, b in
                 if (a.type == "dir") != (b.type == "dir") { return a.type == "dir" }
@@ -497,7 +497,9 @@ struct FileView: View {
     let repo: Repo
     let item: ContentItem
     var highlightLine: Int? = nil
+    var ref: String = ""
     @State private var fullText: String?
+    @State private var imageData: Data?
     @State private var loading = true
     @State private var errorMsg: String?
     @State private var info: String?
@@ -507,6 +509,13 @@ struct FileView: View {
     @State private var message = ""
     @State private var busy = false
     @State private var progressText = ""
+
+    private var branch: String { ref.isEmpty ? (repo.defaultBranch ?? "main") : ref }
+
+    private var isImage: Bool {
+        let n = item.name.lowercased()
+        return n.hasSuffix(".png") || n.hasSuffix(".jpg") || n.hasSuffix(".jpeg") || n.hasSuffix(".gif") || n.hasSuffix(".webp")
+    }
 
     private var isMD: Bool {
         let n = item.name.lowercased()
@@ -535,11 +544,18 @@ struct FileView: View {
             }
             .padding()
         }
-        .neonBackground()
         .navigationTitle(item.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                NavigationLink { BlameView(repo: repo, path: item.path, ref: branch) } label: {
+                    Image(systemName: "text.alignleft")
+                }
+                .accessibilityLabel("追溯")
+                NavigationLink { CommitsView(repo: repo, ref: branch, path: item.path) } label: {
+                    Image(systemName: "clock")
+                }
+                .accessibilityLabel("历史")
                 if canEdit && !editing {
                     Button("编辑") {
                         draft = fullText ?? ""
@@ -560,6 +576,8 @@ struct FileView: View {
         if isMD { TranslateBar(on: $zh) }
         if loading {
             ProgressView()
+        } else if isImage, let data = imageData, let ui = UIImage(data: data) {
+            Image(uiImage: ui).resizable().scaledToFit()
         } else if let t = fullText, !t.isEmpty {
             if isMD {
                 TranslatableMarkdown(text: String(t.prefix(60_000)), translate: zh)
@@ -674,8 +692,14 @@ struct FileView: View {
 
     private func load() async {
         do {
-            let t = try await API.shared.raw("/repos/\(repo.fullName)/contents/\(encPath(item.path))")
-            fullText = t
+            if isImage {
+                let file: RemoteFile = try await API.shared.get("/repos/\(repo.fullName)/contents/\(encPath(item.path))?ref=\(enc(branch))")
+                imageData = file.decoded
+                fullText = nil
+            } else {
+                let t = try await API.shared.raw("/repos/\(repo.fullName)/contents/\(encPath(item.path))?ref=\(enc(branch))")
+                fullText = t
+            }
         } catch {
             errorMsg = errText(error)
         }

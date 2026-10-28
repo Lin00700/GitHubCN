@@ -52,7 +52,7 @@ final class DeviceLogin: ObservableObject {
             do {
                 let dc: DeviceCodeResponse = try await self.form(
                     "https://github.com/login/device/code",
-                    ["client_id": cid, "scope": "repo workflow notifications read:user"]
+                    ["client_id": cid, "scope": "repo workflow gist notifications user project read:org"]
                 )
                 self.userCode = dc.userCode
                 UIPasteboard.general.string = dc.userCode
